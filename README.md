@@ -4,7 +4,7 @@ This repository contains the datafiles and code used to perform genomic diversit
 This analysis was conducted for an MPhil dissertation in Genomic Medicine at the University of Cambridge, 2026.
 
 
-## The repository contains
+## Repository contents
 
 **command-line-documentation.md** - the documentation of command-line tools used for genome quality assessment, dereplication, phylogenetic analysis, pangenome analysis, GWAS, and functional annotation. The document lists commands used, with parameters and tool versions noted.
 
