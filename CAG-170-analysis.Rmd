@@ -1,0 +1,1753 @@
+---
+title: "CAG-170-analysis"
+output: html_document
+date: "2026-07-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(readr)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(networkD3)
+library(htmlwidgets)
+library(scales)
+library(ggrepel)
+library(ape)
+library(phangorn)
+library(vegan)
+library(tidyverse)
+library(patchwork)
+library(webshot2)
+library(RColorBrewer)
+library(forcats)
+library(tibble)
+library(writexl)
+library(panstripe)
+```
+
+## Load data
+# Complete (1,490 genomes) and quality-filtered (562) metadata tables
+
+```{r load-complete}
+metadata_complete <- read_tsv("metadata_complete.tsv", show_col_types = FALSE)
+
+metadata_complete %>% count(Species, sort = TRUE)
+metadata_complete %>% count(Continent, sort = TRUE)
+metadata_complete %>% count(Animal, sort = TRUE)
+```
+
+```{r load-filtered}
+metadata_filtered <- read_tsv("metadata_filtered.tsv", show_col_types = FALSE)
+
+metadata_filtered %>% count(Species, sort = TRUE)
+metadata_filtered %>% count(Continent, sort = TRUE)
+metadata_filtered %>% count(Animal, sort = TRUE)
+```
+
+## Species grouping (top 8 + "Other")
+
+```{r species-grouping}
+# Top 8 species in each dataset
+top8_species_complete <- metadata_complete %>%
+  filter(!is.na(Species), !Species %in% c("Unknown", "NA", "-", "")) %>%
+  count(Species, sort = TRUE) %>%
+  slice_head(n = 8) %>%
+  pull(Species)
+
+top8_species_filtered <- metadata_filtered %>%
+  filter(!is.na(Species), !Species %in% c("Unknown", "NA", "-", "")) %>%
+  count(Species, sort = TRUE) %>%
+  slice_head(n = 8) %>%
+  pull(Species)
+
+# "Other"
+classify_species_plot <- function(species_vec, top8) {
+  species_vec <- trimws(as.character(species_vec))
+  case_when(
+    is.na(species_vec)                           ~ "Other",
+    species_vec %in% c("", "-", "NA", "Unknown") ~ "Other",
+    species_vec %in% top8                        ~ species_vec,
+    TRUE                                         ~ "Other"
+  )
+}
+
+metadata_complete <- metadata_complete %>%
+  mutate(Species_plot = classify_species_plot(Species, top8_species_complete))
+
+metadata_filtered <- metadata_filtered %>%
+  mutate(Species_plot = classify_species_plot(Species, top8_species_filtered))
+
+species_union <- union(top8_species_complete, top8_species_filtered)
+species_colours <- brewer.pal(length(species_union), "Paired")
+
+palette_species <- c(
+  setNames(species_colours, species_union),
+  "Other" = "#DBEDF4"
+)
+```
+
+```{r species-grouping-check}
+metadata_complete %>% count(Species_plot, sort = TRUE)
+metadata_filtered %>% count(Species_plot, sort = TRUE)
+unique(metadata_filtered$Species_plot)
+```
+
+## Palettes
+
+```{r palettes}
+COL_HUMAN   <- "#D3D3D3"
+COL_UNKNOWN <- "#DBEDF4"
+
+# Host palette
+palette_animal <- c(
+  "Human"      = COL_HUMAN,
+  "Pig"        = brewer.pal(8, "Set2")[1],
+  "Mouse"      = brewer.pal(8, "Set2")[2],
+  "Chimpanzee" = brewer.pal(8, "Set2")[3],
+  "Cattle"     = brewer.pal(8, "Set2")[4],
+  "Wild boar"  = brewer.pal(8, "Set2")[5],
+  "Trout"      = brewer.pal(8, "Set2")[6],
+  "Sheep"      = brewer.pal(8, "Set2")[7],
+  "Water deer" = brewer.pal(8, "Set2")[8],
+  "Unknown"    = COL_UNKNOWN
+)
+
+# Continent palette
+palette_continent <- c(
+  setNames(
+    brewer.pal(6, "Accent"),
+    c("Europe", "Asia", "North America", "Oceania", "Africa", "South America")
+  ),
+  "Unknown" = COL_UNKNOWN
+)
+
+# Genome quality palette
+palette_quality <- c("High" = "#99c945", "Medium" = "#f0e442")
+
+# Binary host palette
+palette_host_binary <- c(
+  "Human"   = COL_HUMAN,
+  "Animal"  = brewer.pal(8, "Set2")[2],
+  "Unknown" = COL_UNKNOWN
+)
+
+# Enrichment direction palette
+palette_direction <- c("Enriched" = "#4477AA", "Depleted" = "#CC6666")
+
+# Database source palette
+palette_source <- setNames(
+  brewer.pal(4, "Pastel1"),
+  c("MGnify", "GTDB", "Pig MAG catalogue", "Isolate")
+)
+
+FONT_FAMILY <- "Arial"
+```
+
+## Consistent plotting theme
+
+```{r plotting-theme}
+# Consistent plotting for A4
+FS_TITLE         <- 15
+FS_AXIS_TITLE    <- 10
+FS_AXIS_TEXT     <- 9
+FS_AXIS_TEXT_ROT <- 8
+FS_BAR_LABEL     <- 3.2 
+FS_LEGEND_TITLE  <- 9.5
+FS_LEGEND        <- 9
+FS_COG_AXIS_TEXT <- 7 
+FS_VOLCANO_AXIS  <- 9
+
+theme_clean <- theme_minimal(base_size = 9) +
+  theme(
+    plot.title = element_text(face = "bold", size = FS_TITLE, colour = "black",
+                              hjust = 0.5, margin = margin(b = 6)),
+    axis.title = element_text(size = FS_AXIS_TITLE, face = "bold", colour = "black"),
+    axis.text  = element_text(size = FS_AXIS_TEXT, colour = "black"),
+    legend.title = element_text(size = FS_LEGEND_TITLE, colour = "black"),
+    legend.text  = element_text(size = FS_LEGEND, colour = "black"),
+    panel.grid = element_blank(),
+    legend.position = "right",
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
+  )
+
+theme_clean_rotated_x <- theme_clean +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1,
+                               size = FS_AXIS_TEXT_ROT, colour = "black")
+  )
+
+update_geom_defaults("col", list(colour = NA))
+update_geom_defaults("bar", list(colour = NA))
+
+save_fig <- function(filename_base, plot, width = 17, height = 10, dpi = 300) {
+  ggsave(paste0(filename_base, ".png"), plot = plot,
+         width = width, height = height, units = "cm", dpi = dpi, bg = "white")
+  ggsave(paste0(filename_base, ".pdf"), plot = plot,
+         width = width, height = height, units = "cm", device = cairo_pdf)
+}
+```
+
+## Metadata summary bar charts
+
+```{r panels-complete-source}
+source_counts <- metadata_complete %>%
+  filter(!is.na(Source)) %>%
+  count(Source, sort = TRUE)
+
+fig_source_counts <- ggplot(source_counts, aes(x = reorder(Source, -n), y = n, fill = Source)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.4, size = FS_BAR_LABEL, colour = "black") +
+  scale_fill_brewer(palette = "Pastel1") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Genomes by database source", x = "Source", y = "Number of genomes") +
+  theme_clean_rotated_x +
+  theme(legend.position = "none")
+```
+
+```{r panels-complete-continent}
+continent_counts <- metadata_complete %>%
+  mutate(Continent = ifelse(is.na(Continent), "Unknown", Continent)) %>%
+  count(Continent, sort = TRUE) %>%
+  mutate(Continent = fct_reorder(Continent, -n),
+         Continent = fct_relevel(Continent, "Unknown", after = Inf))
+
+fig_continent_counts <- ggplot(continent_counts, aes(x = Continent, y = n, fill = Continent)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.4, size = FS_BAR_LABEL, colour = "black") +
+  scale_fill_manual(values = palette_continent, na.value = "#DBEDF4") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(title = "Genomes by continent", x = "Continent", y = "Number of genomes") +
+  theme_clean_rotated_x +
+  theme(legend.position = "none")
+```
+
+```{r panels-complete-host}
+animal_counts <- metadata_complete %>%
+  mutate(Animal = ifelse(is.na(Animal), "Unknown", Animal)) %>%
+  count(Animal, sort = TRUE) %>%
+  mutate(Animal = fct_reorder(Animal, -n),
+         Animal = fct_relevel(Animal, "Unknown", after = Inf))
+
+fig_animal_counts <- ggplot(animal_counts, aes(x = Animal, y = n, fill = Animal)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.4, size = FS_BAR_LABEL, colour = "black") +
+  scale_fill_manual(values = palette_animal, na.value = "#DBEDF4") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Genomes by host", x = "Host", y = "Number of genomes") +
+  theme_clean_rotated_x +
+  theme(legend.position = "none")
+```
+
+```{r panels-complete-species}
+species_counts <- metadata_complete %>%
+  filter(!is.na(Species_plot), Species_plot != "Unknown") %>%
+  count(Species_plot, sort = TRUE) %>%
+  mutate(Species_plot = fct_reorder(Species_plot, -n),
+         Species_plot = fct_relevel(Species_plot, "Other", after = Inf))
+
+fig_species_counts <- ggplot(species_counts, aes(x = Species_plot, y = n, fill = Species_plot)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.4, size = FS_BAR_LABEL, colour = "black") +
+  scale_fill_manual(values = palette_species, na.value = "#DBEDF4") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Genomes by species", x = "Species", y = "Number of genomes") +
+  theme_clean_rotated_x +
+  theme(legend.position = "none")
+```
+
+# Filtered dataset panels
+
+```{r panels-filtered-source}
+# add "Source" to filtered dataset from complete dataset
+if (!"Source" %in% colnames(metadata_filtered)) {
+  metadata_filtered <- metadata_filtered %>%
+    left_join(metadata_complete %>% select(Genome, Source), by = "Genome")
+}
+
+source_counts_filtered <- metadata_filtered %>%
+  filter(!is.na(Source)) %>%
+  count(Source, sort = TRUE)
+
+fig_source_counts_filtered <- ggplot(source_counts_filtered, aes(x = reorder(Source, -n), y = n, fill = Source)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.4, size = FS_BAR_LABEL, colour = "black") +
+  scale_fill_brewer(palette = "Pastel1") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Genomes by database source (dereplicated dataset, n=562)",
+       x = "Source", y = "Number of genomes") +
+  theme_clean_rotated_x +
+  theme(legend.position = "none")
+```
+
+```{r panels-filtered-host}
+animal_counts_filtered <- metadata_filtered %>%
+  mutate(Animal = ifelse(is.na(Animal), "Unknown", Animal)) %>%
+  count(Animal, sort = TRUE) %>%
+  mutate(Animal = fct_reorder(Animal, -n),
+         Animal = fct_relevel(Animal, "Unknown", after = Inf))
+
+fig_animal_counts_filtered <- ggplot(animal_counts_filtered, aes(x = Animal, y = n, fill = Animal)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.4, size = FS_BAR_LABEL, colour = "black") +
+  scale_fill_manual(values = palette_animal, na.value = "#DBEDF4") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Genomes by host (dereplicated dataset, n=562)",
+       x = "Host", y = "Number of genomes") +
+  theme_clean_rotated_x +
+  theme(legend.position = "none")
+```
+
+```{r panels-filtered-continent}
+continent_counts_filtered <- metadata_filtered %>%
+  mutate(Continent = ifelse(is.na(Continent), "Unknown", Continent)) %>%
+  count(Continent, sort = TRUE) %>%
+  mutate(Continent = fct_reorder(Continent, -n),
+         Continent = fct_relevel(Continent, "Unknown", after = Inf))
+
+fig_continent_counts_filtered <- ggplot(continent_counts_filtered, aes(x = Continent, y = n, fill = Continent)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.4, size = FS_BAR_LABEL, colour = "black") +
+  scale_fill_manual(values = palette_continent, na.value = "#DBEDF4") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(title = "Genomes by continent (dereplicated dataset, n=562)",
+       x = "Continent", y = "Number of genomes") +
+  theme_clean_rotated_x +
+  theme(legend.position = "none")
+```
+
+```{r panels-filtered-species}
+species_counts_filtered <- metadata_filtered %>%
+  filter(!is.na(Species_plot), Species_plot != "Unknown") %>%
+  count(Species_plot, sort = TRUE) %>%
+  mutate(Species_plot = fct_reorder(Species_plot, -n),
+         Species_plot = fct_relevel(Species_plot, "Other", after = Inf))
+
+fig_species_counts_filtered <- ggplot(species_counts_filtered, aes(x = Species_plot, y = n, fill = Species_plot)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.4, size = FS_BAR_LABEL, colour = "black") +
+  scale_fill_manual(values = palette_species, na.value = "#DBEDF4") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Genomes by species (dereplicated dataset, n=562)",
+       x = "Species", y = "Number of genomes") +
+  theme_clean_rotated_x +
+  theme(legend.position = "none")
+```
+
+# Combined 2×2 grids
+
+```{r grid-complete}
+fig_genomes_complete <- (
+  (fig_source_counts    + labs(title = NULL)) +
+  (fig_animal_counts    + labs(title = NULL)) +
+  (fig_continent_counts + labs(title = NULL)) +
+  (fig_species_counts   + labs(title = NULL))
+) +
+  plot_layout(ncol = 2, nrow = 2, guides = "collect") +
+  plot_annotation(
+    title = "Complete dataset genomes (n=1,490)",
+    theme = theme(plot.title = element_text(face = "bold", size = FS_TITLE, hjust = 0.5))
+  )
+
+fig_genomes_complete
+save_fig("fig_genomes_complete_2x2", fig_genomes_complete, width = 17, height = 15)
+```
+
+```{r grid-filtered}
+fig_genomes_filtered <- (
+  (fig_source_counts_filtered    + labs(title = NULL, x = NULL)) +
+  (fig_animal_counts_filtered    + labs(title = NULL, x = NULL)) +
+  (fig_continent_counts_filtered + labs(title = NULL, x = NULL)) +
+  (fig_species_counts_filtered   + labs(title = NULL, x = NULL))
+) +
+  plot_layout(ncol = 2, nrow = 2, guides = "collect", axis_titles = "collect") +
+  plot_annotation(
+    title = "Filtered dataset genomes (n=562)",
+    theme = theme(plot.title = element_text(face = "bold", size = FS_TITLE, hjust = 0.5))
+  )
+
+fig_genomes_filtered
+save_fig("fig_genomes_filtered_2x2", fig_genomes_filtered, width = 17, height = 15)
+```
+
+## Sankey plot
+
+```{r sankey}
+sankey_data <- metadata_complete %>%
+  mutate(Source = recode(Source, "Pig_catalogue" = "Pig MAG catalogue")) %>%
+  filter(!is.na(Animal), !is.na(Continent), !is.na(Source))
+
+links1 <- sankey_data %>%
+  dplyr::count(Source, Continent, name = "value") %>%
+  dplyr::rename(source = Source, target = Continent)
+
+links2 <- sankey_data %>%
+  dplyr::count(Continent, Animal, name = "value") %>%
+  dplyr::rename(source = Continent, target = Animal)
+
+links <- bind_rows(links1, links2)
+
+nodes <- data.frame(name = unique(c(links$source, links$target))) %>%
+  mutate(
+    group = name,
+    colour = case_when(
+      name %in% names(palette_source)    ~ unname(palette_source[name]),
+      name %in% names(palette_continent) ~ unname(palette_continent[name]),
+      name %in% names(palette_animal)    ~ unname(palette_animal[name]),
+      TRUE ~ "#e3e3e3"
+    )
+  )
+
+links$IDsource <- match(links$source, nodes$name) - 1
+links$IDtarget <- match(links$target, nodes$name) - 1
+
+colour_domain <- paste0('["', paste(nodes$name, collapse = '","'), '"]')
+colour_range  <- paste0('["', paste(nodes$colour, collapse = '","'), '"]')
+ColourScal <- paste0('d3.scaleOrdinal().domain(', colour_domain, ').range(', colour_range, ')')
+
+SANKEY_WIDTH  <- 1800
+SANKEY_HEIGHT <- 1340
+
+sankey_plot <- sankeyNetwork(
+  Links = links, Nodes = nodes,
+  Source = "IDsource", Target = "IDtarget", Value = "value",
+  NodeID = "name", NodeGroup = "group",
+  sinksRight = FALSE, colourScale = ColourScal,
+  nodeWidth = 12, nodePadding = 28,
+  fontSize = FS_LEGEND * 4, fontFamily = "Arial",
+  width = SANKEY_WIDTH, height = SANKEY_HEIGHT
+) %>%
+  htmlwidgets::onRender(
+    "function(el) {
+       d3.select(el).selectAll('.link')
+         .style('stroke', '#999999')
+         .style('stroke-opacity', 0.25);
+     }"
+  )
+
+sankey_plot
+
+sankey_html_path <- file.path(getwd(), "metadata_sankey_plot.html")
+saveWidget(sankey_plot, sankey_html_path, selfcontained = TRUE)
+
+webshot2::webshot(sankey_html_path, "metadata_sankey_plot.png",
+                  vwidth = SANKEY_WIDTH, vheight = SANKEY_HEIGHT, delay = 0.5)
+```
+
+## Assembly quality
+# median, N50 range, contig count, and >500 contig count
+
+```{r qc-summary}
+qc_summary_table <- bind_rows(
+  metadata_complete %>%
+    filter(!is.na(N_contigs), !is.na(N50)) %>%
+    summarise(
+      Dataset        = "Complete (n=1,490)",
+      N50_median     = median(N50),
+      N50_min        = min(N50),
+      N50_max        = max(N50),
+      contig_median  = median(N_contigs),
+      contig_min     = min(N_contigs),
+      contig_max     = max(N_contigs),
+      n_over_500     = sum(N_contigs > 500)
+    ),
+  metadata_filtered %>%
+    filter(!is.na(N_contigs), !is.na(N50)) %>%
+    summarise(
+      Dataset        = "Filtered (n=562)",
+      N50_median     = median(N50),
+      N50_min        = min(N50),
+      N50_max        = max(N50),
+      contig_median  = median(N_contigs),
+      contig_min     = min(N_contigs),
+      contig_max     = max(N_contigs),
+      n_over_500     = sum(N_contigs > 500)
+    )
+)
+
+print(qc_summary_table)
+```
+
+```{r qc-boxplots}
+qc_data <- metadata_complete %>%
+  select(Genome, N_contigs, N50) %>%
+  filter(!is.na(N_contigs), !is.na(N50))
+
+p_contigs_box <- ggplot(qc_data, aes(y = N_contigs)) +
+  geom_boxplot(fill = "#A6CEE3", colour = "black") +
+  scale_y_log10() +
+  labs(title = "Contig count distribution", y = "Number of contigs (log10)", x = NULL) +
+  theme_clean +
+  theme(axis.text.x = element_blank())
+
+p_n50_box <- ggplot(qc_data, aes(y = N50)) +
+  geom_boxplot(fill = "#A6CEE3", colour = "black") +
+  scale_y_log10() +
+  labs(title = "N50 distribution", y = "N50 (log10)", x = NULL) +
+  theme_clean +
+  theme(axis.text.x = element_blank())
+
+p_contigs_box + p_n50_box
+```
+
+```{r qc-histograms}
+p_contigs_hist <- ggplot(qc_data, aes(x = N_contigs)) +
+  geom_histogram(bins = 100, fill = "#A6CEE3", colour = "black", linewidth = 0.2) +
+  geom_vline(xintercept = 500, linetype = "dashed", colour = "#B2182B", linewidth = 0.7) +
+  labs(title = "Contig count histogram", x = "Number of contigs", y = "Number of genomes") +
+  theme_clean
+
+p_n50_hist <- ggplot(qc_data, aes(x = N50)) +
+  geom_histogram(bins = 100, fill = "#A6CEE3", colour = "black", linewidth = 0.2) +
+  scale_x_log10() +
+  labs(title = "N50 histogram (log10)", x = "N50 (log10)", y = "Number of genomes") +
+  theme_clean
+
+p_contigs_hist + p_n50_hist
+
+ggsave("p_contigs_hist.pdf", p_contigs_hist, width = 7, height = 5)
+ggsave("p_n50_hist.pdf", p_n50_hist, width = 7, height = 5)
+```
+
+## Binary host variable
+
+```{r binary-host}
+host_levels <- c("Human", "Animal", "Unknown")
+
+metadata_complete <- metadata_complete %>%
+  mutate(Host_binary = factor(case_when(
+    Animal == "Human" ~ "Human",
+    is.na(Animal) | trimws(as.character(Animal)) %in% c("", "-", "NA", "Unknown") ~ "Unknown",
+    TRUE ~ "Animal"
+  ), levels = host_levels))
+
+metadata_filtered <- metadata_filtered %>%
+  mutate(Host_binary = factor(case_when(
+    Animal == "Human" ~ "Human",
+    is.na(Animal) | trimws(as.character(Animal)) %in% c("", "-", "NA", "Unknown") ~ "Unknown",
+    TRUE ~ "Animal"
+  ), levels = host_levels))
+```
+
+## Species composition by host
+
+```{r species-composition-function}
+make_species_composition <- function(
+    data, fill_var, palette, legend_name, title_topic, filename,
+    stack_order = NULL,
+    plot_mode = "both",
+    show_n = TRUE,
+    include_unknown = FALSE,
+    species_order = NULL
+) {
+
+  if (include_unknown) {
+    data <- data %>%
+      mutate({{ fill_var }} := ifelse(is.na({{ fill_var }}), "Unknown", {{ fill_var }}))
+  }
+
+  if (!is.null(stack_order) && include_unknown) {
+    stack_order <- c(stack_order, "Unknown")
+  }
+
+  plot_data <- data %>%
+    filter(!is.na(Species_plot), Species_plot != "Unknown", !is.na({{ fill_var }})) %>%
+    count(Species_plot, {{ fill_var }}) %>%
+    group_by(Species_plot) %>%
+    mutate(total = sum(n), proportion = n / total) %>%
+    ungroup()
+
+  if (!is.null(species_order)) {
+    plot_data <- plot_data %>%
+      mutate(Species_plot = factor(Species_plot, levels = species_order))
+  } else {
+    plot_data <- plot_data %>%
+      mutate(Species_plot = reorder(Species_plot, -total),
+             Species_plot = forcats::fct_relevel(Species_plot, "Other", after = Inf))
+  }
+
+  if (!is.null(stack_order)) {
+    plot_data <- plot_data %>%
+      mutate({{ fill_var }} := factor({{ fill_var }}, levels = stack_order))
+  }
+
+  totals <- plot_data %>% distinct(Species_plot, total)
+
+  p_count <- ggplot(plot_data, aes(x = Species_plot, y = n, fill = {{ fill_var }})) +
+    geom_col(width = 0.8, position = position_stack(reverse = TRUE)) +
+    geom_text(data = totals, aes(x = Species_plot, y = total, label = total),
+              inherit.aes = FALSE, vjust = -0.4, size = FS_BAR_LABEL,
+              colour = "black", family = FONT_FAMILY) +
+    scale_fill_manual(values = palette, na.value = "#DBEDF4", name = legend_name) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+    labs(title = paste("Genome counts per CAG-170 species by", title_topic),
+         x = NULL, y = "Number of genomes") +
+    theme_clean_rotated_x
+
+  p_prop <- ggplot(plot_data, aes(x = Species_plot, y = proportion, fill = {{ fill_var }})) +
+    geom_col(width = 0.8, position = position_stack(reverse = TRUE)) +
+    scale_fill_manual(values = palette, na.value = "#DBEDF4", name = legend_name) +
+    scale_y_continuous(breaks = c(0.25, 0.50, 0.75, 1.00),
+                       labels = scales::percent_format(accuracy = 1),
+                       limits = c(0, 1), expand = expansion(mult = c(0, 0.12))) +
+    labs(title = paste("Proportion per CAG-170 species by", title_topic),
+         x = "Species", y = "Proportion") +
+    theme_clean_rotated_x
+
+  if (show_n) {
+    p_prop <- p_prop +
+      geom_text(data = totals, aes(x = Species_plot, y = 1, label = paste0("n = ", total)),
+                inherit.aes = FALSE, vjust = -0.5, size = FS_BAR_LABEL,
+                colour = "black", family = FONT_FAMILY)
+  }
+
+  if (plot_mode == "count") {
+    fig <- p_count
+  } else if (plot_mode == "proportion") {
+    fig <- p_prop
+  } else {
+    fig <- (p_count / p_prop + plot_layout(guides = "collect")) &
+      theme(legend.position = "right")
+  }
+
+  filename_base <- tools::file_path_sans_ext(filename)
+  save_fig(filename_base, fig, width = 17, height = ifelse(plot_mode == "both", 16, 6))
+
+  fig
+}
+```
+
+```{r species-composition}
+species_order_filtered <- levels(species_counts_filtered$Species_plot)
+
+fig_species_host_prop <- make_species_composition(
+  metadata_filtered, Host_binary, palette_host_binary, "Host", "host",
+  "fig_species_host_prop.pdf",
+  stack_order = c("Human", "Animal"),
+  plot_mode = "proportion",
+  species_order = species_order_filtered
+)
+
+fig_species_animal_prop <- make_species_composition(
+  metadata_filtered, Animal, palette_animal, "Host", "host",
+  "fig_species_animal_prop.pdf",
+  stack_order = c("Human", "Pig", "Mouse", "Chimpanzee", "Cattle",
+                  "Wild boar", "Trout", "Sheep", "Water deer"),
+  include_unknown = FALSE,
+  plot_mode = "proportion",
+  species_order = species_order_filtered
+)
+
+# Stacked vertically with x-axis species labels only on the bottom panel
+fig_species_all_proportions <- (
+  (fig_species_animal_prop + labs(title = NULL, x = NULL) +
+     theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())) /
+  (fig_species_host_prop   + labs(title = NULL, x = NULL))
+) +
+  plot_layout(guides = "collect", axis_titles = "collect") +
+  plot_annotation(
+    title = stringr::str_wrap("CAG-170 species composition by host", width = 45),
+    theme = theme(plot.title = element_text(face = "bold", family = FONT_FAMILY,
+                                            size = 12, hjust = 0.5))
+  ) &
+  theme(legend.position = "right")
+
+fig_species_all_proportions
+save_fig("fig_species_all_proportions", fig_species_all_proportions, width = 17, height = 10)
+```
+
+## Phylogenetic trees (midpoint rooting)
+# Load, midpoint-root, and save for iTOL visualisation
+```{r trees-root}
+tree_complete <- read.tree("tree_complete.nwk")
+tree_filtered  <- read.tree("tree_filtered.nwk")
+
+tree_complete_rooted <- midpoint(tree_complete)
+tree_filtered_rooted  <- midpoint(tree_filtered)
+
+write.tree(tree_complete_rooted, "tree_1490_midpoint_rooted.nwk")
+write.tree(tree_filtered_rooted,  "tree_562_midpoint_rooted.nwk")
+```
+
+```{r trees-continents}
+# Recode blank/NA continent to "Unknown" for iTOL colour strips
+metadata_complete <- metadata_complete %>%
+  mutate(Continent = ifelse(is.na(Continent) | Continent %in% c("", "-", "NA"),
+                            "Unknown", Continent))
+
+metadata_filtered <- metadata_filtered %>%
+  mutate(Continent = ifelse(is.na(Continent) | Continent %in% c("", "-", "NA"),
+                            "Unknown", Continent))
+```
+
+## iTOL annotation exports
+
+```{r itol-colorstrip-function}
+write_itol_colorstrip <- function(data, id_col, value_col, output_file,
+                                  dataset_label, colour_map,
+                                  strip_width = 120, margin = 20, label_size_factor = 9) {
+  data_out <- data %>%
+    mutate(
+      value  = .data[[value_col]],
+      colour = colour_map[value],
+      colour = ifelse(is.na(colour), "#CCCCCC", colour)
+    ) %>%
+    transmute(id = .data[[id_col]], colour, label = value)
+
+  # Legend list the categories that are present in the dataset
+  present_values <- names(colour_map)[names(colour_map) %in% unique(data_out$label)]
+  legend_colors <- unname(colour_map[present_values])
+  legend_shapes <- rep(1, length(present_values))
+
+  writeLines(c(
+    "DATASET_COLORSTRIP", "SEPARATOR TAB",
+    paste0("DATASET_LABEL\t", dataset_label),
+    "COLOR\t#000000", "SHOW_STRIP_LABELS\t0",
+    paste0("STRIP_WIDTH\t", strip_width),
+    paste0("MARGIN\t", margin),
+    "SHOW_LABELS\t1",
+    paste0("SIZE_FACTOR\t", label_size_factor),
+    paste0("LEGEND_TITLE\t", dataset_label),
+    paste0("LEGEND_SHAPES\t", paste(legend_shapes, collapse = "\t")),
+    paste0("LEGEND_COLORS\t", paste(legend_colors, collapse = "\t")),
+    paste0("LEGEND_LABELS\t", paste(present_values, collapse = "\t")),
+    "", "DATA",
+    paste(data_out$id, data_out$colour, data_out$label, sep = "\t")
+  ), output_file)
+
+  message("Written: ", output_file)
+}
+```
+
+# Flagging genomes with more than 500 contigs and failed GUNC in complete dataset
+```{r itol-qc-markers}
+qc_flags <- metadata_complete %>%
+  mutate(
+    Tree_ID      = str_replace(Genome, "\\.fa$", ""),
+    high_contigs = ifelse(N_contigs > 500, 1, -1),
+    gunc_fail    = ifelse(GUNC_pass == "no", 1, -1)
+  ) %>%
+  filter(high_contigs == 1 | gunc_fail == 1)
+
+writeLines(c(
+  "DATASET_BINARY", "SEPARATOR TAB",
+  "DATASET_LABEL\tGenome QC markers", "COLOR\t#000000",
+  "FIELD_SHAPES\t3\t3",
+  "FIELD_LABELS\tN_contigs > 500\tFailed GUNC",
+  "FIELD_COLORS\t#E9B200\t#461D7C",
+  "MAXIMUM_SIZE\t15",
+  "SHOW_LABELS\t0", "MARGIN\t20", "HEIGHT_FACTOR\t8",
+  "SYMBOL_SPACING\t-25",
+  "HORIZONTAL_GRID\t0",
+  "VERTICAL_GRID\t0",
+  "LEGEND_TITLE\tQC flags",
+  "LEGEND_SHAPES\t3\t3",
+  "LEGEND_COLORS\t#E9B200\t#461D7C",
+  "LEGEND_LABELS\tN_contigs > 500\tFailed GUNC",
+  "DATA",
+  paste(qc_flags$Tree_ID, qc_flags$high_contigs, qc_flags$gunc_fail, sep = "\t")
+), "itol_qc_markers.txt")
+message("Written: itol_qc_markers.txt")
+```
+
+```{r itol-clades-1490}
+clade_members <- list(
+  "Clade I" = c(
+    "S93310B_bin_30", "F5381_bin_58", "MGYG000303586", "GCA_016297855.1",
+    "MGYG000301861", "GCA_945916265.1", "LW1-s151260_bin_10", "LW2-s127530_bin_14",
+    "LW1-s151250_bin_39", "GCA_022770025.1", "GCA_004555655.1", "LW2-s126572_bin_26",
+    "LW1-s150971_bin_18", "W4930_bin_59", "MGYG000301454", "GCA_945876125.1"
+  ),
+  "Clade II" = c(
+    "MGYG000301360", "GCA_945874875.1", "GCA_022779855.1", "MGYG000301662",
+    "GCA_945910055.1", "GCA_034087285.1", "GCA_028725385.1", "GCA_029012045.1",
+    "MGYG000302872", "GCA_946012855.1"
+  ),
+  "Clade III" = c(
+    "W4950_bin_7", "GCA_004556885.1", "GCA_022781885.1", "GCA_017938825.1",
+    "GCA_034087745.1", "GCA_028722805.1", "GCA_034117885.1", "GCA_004559455.1",
+    "GCA_004554725.1", "GCA_022774265.1", "MGYG000301729", "GCA_945911325.1",
+    "MGYG000301121", "GCA_945870135.1", "MGYG000302830", "GCA_946007635.1",
+    "GCA_028725405.1", "GCA_022771045.1", "MGYG000299607", "GCA_947072225.1",
+    "MGYG000303269", "GCA_946409655.1", "GCA_004554295.1", "GCA_022774875.1",
+    "MGYG000301158", "MGYG000300246", "GCA_945870995.1", "GCA_945827745.1"
+  )
+)
+
+clade_members <- lapply(clade_members, stringr::str_replace_all, " ", "_")
+colours <- c("Clade I" = "#FDC9B4", "Clade II" = "#FDC9B4", "Clade III" = "#FDC9B4")
+
+data_lines <- sapply(names(clade_members), function(clade) {
+  tips <- clade_members[[clade]]
+  col  <- colours[[clade]]
+  paste(dplyr::first(tips), dplyr::last(tips), col, "", col, "solid", 1,
+        clade, "#000000", 1, "bold", sep = ",")
+})
+
+writeLines(c(
+  "DATASET_RANGE", "SEPARATOR COMMA",
+  "DATASET_LABEL,Animal-associated clades",
+  "COLOR,#FC8D62", "RANGE_TYPE,box", "RANGE_COVER,clade",
+  "COVER_LABELS,0", "COVER_DATASETS,0", "FIT_LABELS,0",
+  "SHOW_LABELS,1", "LABEL_POSITION,top-right",
+  "LABELS_VERTICAL,0", "STRAIGHT_LABELS,1",
+  "LEGEND_TITLE,Animal-associated clades",
+  paste0("LEGEND_SHAPES,", paste(rep(1, 3), collapse = ",")),
+  paste0("LEGEND_COLORS,", paste(colours, collapse = ",")),
+  paste0("LEGEND_LABELS,", paste(names(colours), collapse = ",")),
+  "DATA", data_lines
+), "itol_animal_clades.txt")
+```
+
+# Range boxes for animal-associated clades (genome IDs identified from the visualised trees)
+```{r itol-clades-562}
+clade_members_filtered <- list(
+  "Clade I" = c(
+    "GCA_016297855.1", "GCA_945916265.1", "GCA_022770025.1", "GCA_004555655.1",
+    "LW2-s127530_bin_14", "LW1-s151260_bin_10", "LW2-s126572_bin_26"
+  ),
+  "Clade II" = c(
+    "GCA_029012045.1", "GCA_034087285.1", "GCA_028725385.1",
+    "GCA_945874875.1", "GCA_945910055.1"
+  ),
+  "Clade III" = c(
+    "W4950_bin_7", "GCA_004556885.1", "GCA_028722805.1", "GCA_022781885.1",
+    "GCA_004554725.1", "GCA_022774265.1", "GCA_034117885.1", "GCA_022774875.1",
+    "GCA_028725405.1", "GCA_004554295.1", "GCA_029226425.1", "GCA_022771045.1",
+    "GCA_037248705.1", "MGYG000144480", "MGYG000034682"
+  )
+)
+
+clade_members_filtered <- lapply(clade_members_filtered, stringr::str_replace_all, " ", "_")
+colours <- c("Clade I" = "#FDC9B4", "Clade II" = "#FDC9B4", "Clade III" = "#FDC9B4")
+
+data_lines <- sapply(names(clade_members_filtered), function(clade) {
+  tips <- clade_members_filtered[[clade]]
+  col  <- colours[[clade]]
+  paste(dplyr::first(tips), dplyr::last(tips), col, "", col, "solid", 1,
+        clade, "#000000", 1, "bold", sep = ",")
+})
+
+writeLines(c(
+  "DATASET_RANGE", "SEPARATOR COMMA",
+  "DATASET_LABEL,Animal-associated clades",
+  "COLOR,#FC8D62", "RANGE_TYPE,box", "RANGE_COVER,clade",
+  "COVER_LABELS,0", "COVER_DATASETS,0", "FIT_LABELS,0",
+  "SHOW_LABELS,1", "LABEL_POSITION,top-right",
+  "LABELS_VERTICAL,0", "STRAIGHT_LABELS,1",
+  "LEGEND_TITLE,Animal-associated clades",
+  paste0("LEGEND_SHAPES,", paste(rep(1, 3), collapse = ",")),
+  paste0("LEGEND_COLORS,", paste(colours, collapse = ",")),
+  paste0("LEGEND_LABELS,", paste(names(colours), collapse = ",")),
+  "DATA", data_lines
+), "itol_animal_clades_562.txt")
+```
+
+```{r itol-colorstrips-1490}
+metadata_itol <- metadata_complete %>%
+  mutate(Species_itol = ifelse(Species_plot == "Unknown", "Other", Species_plot))
+
+write_itol_colorstrip(metadata_itol, "Genome", "Species_itol",
+                      "itol_species.txt", "Species", palette_species, label_size_factor = 12)
+write_itol_colorstrip(metadata_itol, "Genome", "Host_binary",
+                      "itol_host_binary.txt", "Host", palette_host_binary, label_size_factor = 12)
+write_itol_colorstrip(metadata_itol, "Genome", "Continent",
+                      "itol_continent.txt", "Continent", palette_continent, label_size_factor = 12)
+write_itol_colorstrip(metadata_itol, "Genome", "CheckM_quality",
+                      "itol_genome_quality.txt", "Genome quality", palette_quality, label_size_factor = 12)
+```
+
+```{r itol-colorstrips-562}
+metadata_filtered_itol <- metadata_filtered %>%
+  mutate(Species_itol = Species_plot)
+
+write_itol_colorstrip(metadata_filtered_itol, "Genome", "Host_binary",
+                      "itol_host_binary_562.txt", "Host", palette_host_binary, label_size_factor = 9)
+write_itol_colorstrip(metadata_filtered_itol, "Genome", "Continent",
+                      "itol_continent_562.txt", "Continent", palette_continent, label_size_factor = 9)
+write_itol_colorstrip(metadata_filtered_itol, "Genome", "Species_itol",
+                      "itol_species_562.txt", "Species", palette_species, label_size_factor = 9)
+```
+
+## Per-continent phylogenetic diversity (complete dataset)
+
+```{r diversity-distances}
+continents_to_test <- c("Europe", "Asia", "North America", "Africa", "Oceania", "South America")
+
+diversity_distances_complete <- tibble()
+
+for (cont in continents_to_test) {
+  genomes_in_cont <- metadata_complete %>% filter(Continent == cont) %>% pull(Genome)
+  tips_present    <- intersect(genomes_in_cont, tree_complete$tip.label)
+
+  subtree     <- keep.tip(tree_complete, tips_present)
+  dist_matrix <- cophenetic.phylo(subtree)
+
+  cont_distances <- tibble(
+    Continent         = cont,
+    n_genomes         = length(tips_present),
+    pairwise_distance = as.vector(as.dist(dist_matrix))
+  )
+
+  diversity_distances_complete <- bind_rows(diversity_distances_complete, cont_distances)
+}
+```
+
+```{r diversity-boxplot}
+fig_continent_diversity_complete <- ggplot(
+  diversity_distances_complete,
+  aes(x = reorder(Continent, pairwise_distance, median),
+      y = pairwise_distance, fill = Continent)
+) +
+  geom_boxplot(colour = "grey30", linewidth = 0.3, outlier.size = 0.6, outlier.alpha = 0.5) +
+  scale_fill_manual(values = palette_continent, na.value = "#DBEDF4") +
+  labs(x = NULL, y = "Pairwise cophenetic distance") +
+  theme_clean +
+  theme(
+    legend.position    = "none",
+    axis.text.x        = element_text(size = 15, face = "bold", angle = 30, hjust = 1),
+    axis.text.y        = element_text(size = 14, face = "bold"),
+    axis.title.y       = element_text(size = 16, face = "bold"),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+fig_continent_diversity_complete
+save_fig("fig_continent_diversity1490", fig_continent_diversity_complete, width = 18, height = 12)
+```
+
+## PCoA of accessory genome content
+# Normalise genome IDs (for the ones starting with "GCA_")
+
+```{r pangenome-fix-function}
+fix_isolate_id <- function(mat) {
+  colnames(mat) <- ifelse(
+    grepl("^GCA_", colnames(mat)),
+    sub("^(GCA_[0-9]+\\.[0-9]+).*", "\\1", colnames(mat)),
+    colnames(mat)
+  )
+  colnames(mat)[colnames(mat) == "GCA_916988195.3"] <- "GCA_916988195.3_POC01_20211130"
+  mat
+}
+```
+
+# Build the accessory-genome Jaccard distance, run PCoA, and k-means clustering
+```{r pcoa-compute}
+pan <- read.delim("gene_presence_absence_filtered.Rtab", header = TRUE,
+                  row.names = 1, check.names = FALSE)
+pan_matrix <- fix_isolate_id(as.matrix(pan))
+
+gene_prevalence <- rowSums(pan_matrix) / ncol(pan_matrix)
+pan_filtered    <- pan_matrix[gene_prevalence >= 0.15 & gene_prevalence <= 0.95, ]
+pan_t           <- t(pan_filtered)
+
+jaccard_dist <- vegdist(pan_t, method = "jaccard")
+pcoa         <- cmdscale(jaccard_dist, k = 2, eig = TRUE)
+
+pcoa_df <- data.frame(
+  Genome = rownames(pan_t), PC1 = pcoa$points[, 1], PC2 = pcoa$points[, 2]
+) %>%
+  left_join(
+    metadata_filtered %>%
+      select(Genome, Animal, Continent, Species_plot, Host_binary),
+    by = "Genome"
+  )
+
+for (k in 2:4) {
+  set.seed(123)
+  pcoa_df[[paste0("k", k)]] <- as.character(kmeans(pcoa_df[, c("PC1", "PC2")], centers = k)$cluster)
+}
+pcoa_df$Cluster <- pcoa_df$k3
+```
+
+# Run elbow method to identify optimal number of clusters
+```{r pcoa-elbow}
+wss <- sapply(1:10, function(k) {
+  set.seed(123)
+  kmeans(pcoa_df[, c("PC1", "PC2")], centers = k, nstart = 1)$tot.withinss
+})
+elbow_df <- data.frame(k = 1:10, wss = wss)
+
+fig_elbow <- ggplot(elbow_df, aes(x = k, y = wss)) +
+  geom_line() +
+  geom_point(size = 3) +
+  scale_x_continuous(breaks = 1:10) +
+  labs(title = "Elbow plot for k-means clustering",
+       x = "Number of clusters (k)", y = "Within-cluster sum of squares") +
+  theme_clean
+
+fig_elbow
+save_fig("fig_elbow", fig_elbow, width = 17, height = 9)
+```
+
+```{r pcoa-kmeans}
+palette_kmeans <- setNames(brewer.pal(3, "Set1"), c("1", "2", "3"))
+
+pcoa_kmeans <- ggplot(pcoa_df, aes(x = PC1, y = PC2, colour = Cluster)) +
+  geom_point(size = 2) +
+  scale_colour_manual(values = palette_kmeans, name = "Cluster") +
+  labs(title = "PCoA of accessory genome content (k=3)") +
+  theme_clean
+
+pcoa_kmeans
+ggsave("pcoa.png", pcoa_kmeans, width = 7, height = 5)
+```
+
+```{r pcoa-host}
+pcoa_df_host_ordered <- pcoa_df %>% arrange(Host_binary == "Animal")
+
+pcoa_host <- ggplot(pcoa_df_host_ordered, aes(x = PC1, y = PC2, colour = Host_binary)) +
+  geom_point(size = 2) +
+  scale_colour_manual(values = palette_host_binary, na.value = "#DBEDF4", name = "Host") +
+  labs(title = "PCoA of accessory genome content, coloured by host") +
+  theme_clean
+
+pcoa_host
+ggsave("pcoa_host.png", pcoa_host, width = 7, height = 5)
+```
+
+```{r pcoa-continent}
+pcoa_continent <- ggplot(pcoa_df, aes(x = PC1, y = PC2, colour = Continent)) +
+  geom_point(size = 2) +
+  scale_colour_manual(values = palette_continent, na.value = "#DBEDF4", name = "Continent") +
+  labs(title = "PCoA of accessory genome content, coloured by continent") +
+  theme_clean
+
+pcoa_continent
+ggsave("pcoa_continent.png", pcoa_continent, width = 7, height = 5)
+```
+
+```{r pcoa-species}
+pcoa_species <- ggplot(pcoa_df, aes(x = PC1, y = PC2, colour = Species_plot)) +
+  geom_point(size = 2) +
+  scale_colour_manual(values = palette_species, na.value = "#DBEDF4", name = "Species") +
+  labs(title = "PCoA of accessory genome content, coloured by species") +
+  theme_clean
+
+pcoa_species
+ggsave("pcoa_species.png", pcoa_species, width = 7, height = 5)
+```
+
+```{r pcoa-combined}
+pcoa_kmeans <- pcoa_kmeans +
+  labs(title = NULL) +
+  guides(colour = guide_legend(nrow = 1, byrow = TRUE)) +
+  theme(legend.text = element_text(size = 8),
+        legend.title = element_text(size = 9, face = "bold"),
+        legend.key.width = grid::unit(0.3, "cm"),
+        legend.key.height = grid::unit(0.3, "cm"))
+
+pcoa_host <- pcoa_host +
+  labs(title = NULL) +
+  guides(colour = guide_legend(nrow = 1, byrow = TRUE)) +
+  theme(legend.text = element_text(size = 8),
+        legend.title = element_text(size = 9, face = "bold"),
+        legend.key.width = grid::unit(0.3, "cm"),
+        legend.key.height = grid::unit(0.3, "cm"))
+
+pcoa_continent <- pcoa_continent +
+  labs(title = NULL) +
+  guides(colour = guide_legend(nrow = 3, byrow = TRUE)) +
+  theme(legend.text = element_text(size = 6.5),
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.key.width = grid::unit(0.22, "cm"),
+        legend.key.height = grid::unit(0.22, "cm"))
+
+pcoa_species <- pcoa_species +
+  labs(title = NULL) +
+  guides(colour = guide_legend(nrow = 5, byrow = TRUE)) +
+  theme(legend.text = element_text(size = 6.5),
+        legend.title = element_text(size = 8, face = "bold"),
+        legend.key.width = grid::unit(0.22, "cm"),
+        legend.key.height = grid::unit(0.22, "cm"))
+
+fig_pcoa_combined <- (pcoa_kmeans + pcoa_host + pcoa_continent + pcoa_species) +
+  plot_layout(ncol = 2, nrow = 2, guides = "keep",
+              axes = "collect", axis_titles = "collect") +
+  plot_annotation(
+    title = "Principal coordinate analysis of accessory-genome composition",
+    theme = theme(plot.title = element_text(size = 15, face = "bold", colour = "black",
+                                            hjust = 0.5, margin = margin(b = 8)))
+  ) &
+  theme(panel.border = element_rect(colour = "grey50", fill = NA, linewidth = 0.6),
+        legend.position = "bottom", legend.direction = "horizontal",
+        legend.spacing.x = grid::unit(0.08, "cm"),
+        plot.margin = margin(4, 4, 4, 4))
+
+fig_pcoa_combined
+
+ggsave("fig_pcoa_combined.png", fig_pcoa_combined,
+       width = 17, height = 15, units = "cm", dpi = 300, bg = "white")
+```
+
+## PERMANOVA
+# Using cophenetic distances derived from phylogenetic trees; each variable is tested individually.
+
+```{r permanova-phylo}
+run_permanova_phylo <- function(variable, metadata_obj, tree_obj, dataset_label) {
+
+  common_ids  <- intersect(tree_obj$tip.label, metadata_obj$Genome)
+  tree_pruned <- keep.tip(tree_obj, common_ids)
+
+  meta_sub <- metadata_obj %>%
+    filter(Genome %in% tree_pruned$tip.label,
+           !is.na(.data[[variable]]),
+           !.data[[variable]] %in% c("Unknown", "NA", "-")) %>%
+    distinct(Genome, .keep_all = TRUE) %>%
+    arrange(match(Genome, tree_pruned$tip.label))
+
+  phylo_dist <- cophenetic.phylo(tree_pruned)
+  dist_sub   <- as.dist(phylo_dist[meta_sub$Genome, meta_sub$Genome])
+  f          <- as.formula(paste("dist_sub ~", variable))
+
+  set.seed(123)
+  result <- adonis2(f, data = meta_sub, permutations = 999)
+
+  tibble(
+    Variable   = variable,
+    R2_percent = result$R2[1] * 100,
+    p_value    = result$`Pr(>F)`[1],
+    Dataset    = dataset_label
+  )
+}
+
+vars <- c("Continent", "Country", "Animal", "Species")
+
+permanova_complete <- bind_rows(
+  lapply(vars, run_permanova_phylo,
+         metadata_obj = metadata_complete, tree_obj = tree_complete,
+         dataset_label = "Full dataset (n=1,490)")
+)
+
+permanova_filtered <- bind_rows(
+  lapply(vars, run_permanova_phylo,
+         metadata_obj = metadata_filtered, tree_obj = tree_filtered,
+         dataset_label = "Dereplicated subset (n=562)")
+)
+
+permanova_complete %>% print(n = Inf)
+permanova_filtered  %>% print(n = Inf)
+```
+
+```{r permanova-phylo-1490-plot}
+permanova_phylo_plot <- permanova_complete %>%
+  filter(Variable %in% c("Animal", "Continent")) %>%
+  mutate(
+    Variable = recode(Variable, "Animal" = "Host", "Continent" = "Continent"),
+    Variable = reorder(Variable, R2_percent),
+    sig_label = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01  ~ "**",
+      p_value < 0.05  ~ "*",
+      TRUE            ~ "ns"
+    ),
+    bar_label = paste0(round(R2_percent, 1), "% ", sig_label)
+  )
+
+fig_permanova_phylo <- ggplot(permanova_phylo_plot, aes(x = R2_percent, y = Variable)) +
+  geom_col(fill = "#999999", width = 0.6, colour = "grey30", linewidth = 0.3) +
+  geom_text(aes(label = bar_label), hjust = -0.1, size = 6.5,
+            colour = "black", fontface = "bold") +
+  labs(x = expression("Variance explained (R"^2*", %)"), y = NULL) +
+  theme_clean +
+  theme(panel.grid.major.y = element_blank(),
+        axis.text  = element_text(size = 16, face = "bold"),
+        axis.title = element_text(size = 17, face = "bold")) +
+  expand_limits(x = max(permanova_phylo_plot$R2_percent) * 1.3)
+
+fig_permanova_phylo
+save_fig("fig_permanova_phylo", fig_permanova_phylo, width = 16, height = 4)
+```
+
+```{r permanova-phylo-562-plot}
+permanova_filtered_plot <- permanova_filtered %>%
+  filter(Variable %in% c("Animal", "Continent")) %>%
+  mutate(
+    Variable = recode(Variable, "Animal" = "Host", "Continent" = "Continent"),
+    Variable = reorder(Variable, R2_percent),
+    sig_label = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01  ~ "**",
+      p_value < 0.05  ~ "*",
+      TRUE            ~ "ns"
+    ),
+    bar_label = paste0(round(R2_percent, 1), "% ", sig_label)
+  )
+
+fig_permanova_filtered <- ggplot(permanova_filtered_plot, aes(x = R2_percent, y = Variable)) +
+  geom_col(fill = "#0050A0", width = 0.6, colour = "grey30", linewidth = 0.3) +
+  geom_text(aes(label = bar_label), hjust = -0.1, size = 6.5,
+            colour = "black", fontface = "bold") +
+  labs(x = expression("Variance explained (R"^2*", %)"), y = NULL) +
+  theme_clean +
+  theme(panel.grid.major.y = element_blank(),
+        axis.text  = element_text(size = 16, face = "bold"),
+        axis.title = element_text(size = 17, face = "bold")) +
+  expand_limits(x = max(permanova_filtered_plot$R2_percent) * 1.3)
+
+fig_permanova_filtered
+save_fig("fig_permanova_562", fig_permanova_filtered, width = 16, height = 4)
+```
+
+# Using Jaccard distances for accessory genome; each variable is tested individually.
+```{r permanova-jaccard-compute}
+run_permanova_jaccard <- function(variable) {
+  dist_ids <- rownames(as.matrix(jaccard_dist))
+
+  meta_sub <- metadata_filtered %>%
+    filter(Genome %in% dist_ids,
+           !is.na(.data[[variable]]),
+           !.data[[variable]] %in% c("Unknown", "NA", "-")) %>%
+    arrange(match(Genome, dist_ids))
+
+  dist_sub <- as.dist(as.matrix(jaccard_dist)[meta_sub$Genome, meta_sub$Genome])
+  f        <- as.formula(paste("dist_sub ~", variable))
+
+  set.seed(123)
+  result <- adonis2(f, data = meta_sub, permutations = 999)
+
+  tibble(
+    Variable   = variable,
+    R2_percent = result$R2[1] * 100,
+    p_value    = result$`Pr(>F)`[1]
+  )
+}
+
+permanova_jaccard <- bind_rows(
+  lapply(c("Species", "Continent", "Animal"),
+         run_permanova_jaccard)
+) %>%
+  mutate(
+    Variable = recode(Variable,
+      "Animal"      = "Host"),
+    Variable  = reorder(Variable, R2_percent)
+  )
+
+cat("=== PERMANOVA: Jaccard distance (accessory genome, n=562) ===\n")
+print(permanova_jaccard)
+```
+
+
+## Pangenome accumulation and panstripe (visualisation)
+```{r pangenome-load}
+pa_genus <- pan_matrix
+
+# Species-level presence/absence matrix
+pa_sp002404795_raw <- read.delim("gene_presence_absence_sp002404795.Rtab",
+                                 header = TRUE, row.names = 1, check.names = FALSE)
+
+pa_sp002404795_raw <- as.matrix(fix_isolate_id(pa_sp002404795_raw))
+```
+
+```{r pangenome-subset}
+sp002404795_genomes <- metadata_filtered %>% filter(Species == "sp002404795") %>% pull(Genome)
+
+tree_sp002404795_full <- keep.tip(tree_filtered, intersect(sp002404795_genomes, tree_filtered$tip.label))
+
+common_sp002404795 <- intersect(tree_sp002404795_full$tip.label, colnames(pa_sp002404795_raw))
+
+tree_sp002404795 <- keep.tip(tree_sp002404795_full, common_sp002404795)
+
+pa_sp002404795 <- pa_sp002404795_raw[, common_sp002404795, drop = FALSE]
+```
+
+```{r accumulation-curve-function}
+PANGENOME_COLOUR  <- "#009E73"
+COREGENOME_COLOUR <- "#D55E00"
+
+make_acc_curve <- function(pa_obj, subtitle_label, n_iterations = 100) {
+  set.seed(123)
+  n_genomes <- nrow(pa_obj)
+  acc_results <- vector("list", n_iterations)
+
+  for (i in seq_len(n_iterations)) {
+    order_i    <- sample(n_genomes)
+    pa_ordered <- pa_obj[order_i, , drop = FALSE]
+    cum_mat <- apply(pa_ordered, 2, cumsum)
+    if (!is.matrix(cum_mat)) cum_mat <- matrix(cum_mat, nrow = n_genomes)
+    pan_size  <- rowSums(cum_mat >= 1)
+    core_size <- sapply(seq_len(n_genomes), function(k) sum(cum_mat[k, ] == k))
+    acc_results[[i]] <- data.frame(n_genomes = seq_len(n_genomes),
+                                   pan_size = pan_size, core_size = core_size, iteration = i)
+  }
+
+  acc_summary <- bind_rows(acc_results) %>%
+    group_by(n_genomes) %>%
+    summarise(
+      pan_mean = mean(pan_size), pan_q025 = quantile(pan_size, 0.025), pan_q975 = quantile(pan_size, 0.975),
+      core_mean = mean(core_size), core_q025 = quantile(core_size, 0.025), core_q975 = quantile(core_size, 0.975),
+      .groups = "drop"
+    )
+
+  ggplot(acc_summary, aes(x = n_genomes)) +
+    geom_ribbon(aes(ymin = pan_q025, ymax = pan_q975), fill = PANGENOME_COLOUR, alpha = 0.15) +
+    geom_line(aes(y = pan_mean, colour = "Pan-genome"), linewidth = 0.8) +
+    geom_ribbon(aes(ymin = core_q025, ymax = core_q975), fill = COREGENOME_COLOUR, alpha = 0.15) +
+    geom_line(aes(y = core_mean, colour = "Core genome"), linewidth = 0.8) +
+    scale_colour_manual(values = c("Pan-genome" = PANGENOME_COLOUR,
+                                   "Core genome" = COREGENOME_COLOUR), name = NULL) +
+    labs(x = "Number of genomes", y = "Number of gene clusters", subtitle = subtitle_label) +
+    theme_clean +
+    theme(legend.position = "top")
+}
+```
+
+```{r accumulation-curves}
+fig_acc_all         <- make_acc_curve(t(pan_matrix),      "Genus level (n=562)")
+fig_acc_sp002404795 <- make_acc_curve(t(pa_sp002404795),  "sp002404795")
+
+fig_acc_all
+fig_acc_sp002404795
+```
+
+```{r panstripe-check}
+stopifnot(all(colnames(pa_genus)       %in% tree_filtered$tip.label))
+stopifnot(all(colnames(pa_sp002404795) %in% tree_sp002404795$tip.label))
+```
+
+```{r pangenome-genus-fig}
+fig_u_all <- plot_u(t(pa_genus), tree_filtered)
+fig_u_all$layers[[1]]$aes_params$fill <- PANGENOME_COLOUR
+fig_u_all <- fig_u_all + theme_clean + labs(title = NULL)
+
+fig_pangenome_genus <- (
+  (fig_acc_all + labs(subtitle = NULL)) + fig_u_all
+) +
+  plot_layout(nrow = 1, guides = "collect") +
+  plot_annotation(
+    title = "Genus-level pangenome",
+    theme = theme(plot.title = element_text(size = 18, face = "bold", hjust = 0.5))
+  ) &
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", hjust = 0.5))
+
+fig_pangenome_genus
+save_fig("fig_pangenome_genus", fig_pangenome_genus, width = 17, height = 8)
+```
+
+```{r pangenome-species-fig}
+fig_u_sp002404795 <- plot_u(t(pa_sp002404795), tree_sp002404795)
+fig_u_sp002404795$layers[[1]]$aes_params$fill <- PANGENOME_COLOUR
+fig_u_sp002404795 <- fig_u_sp002404795 + theme_clean + labs(title = NULL)
+
+fig_pangenome_species <- (
+  (fig_acc_sp002404795 + labs(subtitle = NULL)) + fig_u_sp002404795
+) +
+  plot_layout(nrow = 1, guides = "collect") +
+  plot_annotation(
+    title = "Species-level pangenome",
+    theme = theme(plot.title = element_text(size = 18, face = "bold", hjust = 0.5))
+  ) &
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", hjust = 0.5))
+
+fig_pangenome_species
+save_fig("fig_pangenome_species", fig_pangenome_species, width = 17, height = 8)
+```
+
+## GWAS: human vs non-human
+
+```{r gwas-files}
+pyseer_files <- tribble(
+  ~label,               ~file,                                   ~direction_label, ~title,
+  "human_nocovar",      "pyseer_human_results.tsv",              "human",          "Human vs non-human",
+  "human_covar",        "pyseer_human_covar_results.tsv",        "human",          "Human vs non-human (species-adjusted)",
+  "sp002404795_human",  "pyseer_sp002404795_human_results.tsv",  "human",          "Human vs non-human (species-level GWAS)"
+)
+
+read_and_fdr <- function(file) {
+  read_tsv(file, show_col_types = FALSE) %>%
+    filter(!is.na(`lrt-pvalue`), `lrt-pvalue` > 0) %>%
+    mutate(p_fdr = p.adjust(`lrt-pvalue`, method = "fdr"))
+}
+
+pyseer_data <- lapply(pyseer_files$file, read_and_fdr)
+names(pyseer_data) <- pyseer_files$label
+```
+
+
+```{r gwas-annotation-sources}
+read_eggnog <- function(file) {
+  raw <- read_tsv(file, comment = "##", show_col_types = FALSE)
+  raw %>%
+    rename(variant = `#query`, preferred = Preferred_name, cog = COG_category, eggnog_desc = Description) %>%
+    select(variant, preferred, cog, eggnog_desc) %>%
+    mutate(
+      preferred   = ifelse(preferred   == "-" | is.na(preferred),   NA_character_, preferred),
+      cog         = ifelse(cog         == "-" | is.na(cog),         NA_character_, cog),
+      eggnog_desc = ifelse(eggnog_desc == "-" | is.na(eggnog_desc), NA_character_, eggnog_desc)
+    )
+}
+
+eggnog_filtered <- read_eggnog("eggnog.emapper.annotations_filtered")
+eggnog_sp002404795 <- read_eggnog("eggnog.emapper.annotations_sp002404795")
+
+eggnog_lookup <- list(
+  human_nocovar     = eggnog_filtered,
+  human_covar       = eggnog_filtered,
+  sp002404795_human = eggnog_sp002404795
+)
+```
+
+```{r cog-labels}
+cog_labels <- c(
+  # INFORMATION STORAGE AND PROCESSING
+  J = "Translation, ribosomal structure and biogenesis",
+  A = "RNA processing and modification",
+  K = "Transcription",
+  L = "Replication, recombination and repair",
+  B = "Chromatin structure and dynamics",
+  # CELLULAR PROCESSES AND SIGNALING
+  D = "Cell cycle control, cell division, chromosome partitioning",
+  Y = "Nuclear structure",
+  V = "Defense mechanisms",
+  T = "Signal transduction mechanisms",
+  M = "Cell wall/membrane/envelope biogenesis",
+  N = "Cell motility",
+  Z = "Cytoskeleton",
+  W = "Extracellular structures",
+  U = "Intracellular trafficking, secretion, and vesicular transport",
+  O = "Posttranslational modification, protein turnover, chaperones",
+  # METABOLISM
+  C = "Energy production and conversion",
+  G = "Carbohydrate transport and metabolism",
+  E = "Amino acid transport and metabolism",
+  F = "Nucleotide transport and metabolism",
+  H = "Coenzyme transport and metabolism",
+  I = "Lipid transport and metabolism",
+  P = "Inorganic ion transport and metabolism",
+  Q = "Secondary metabolites biosynthesis, transport and catabolism",
+  # POORLY CHARACTERIZED
+  R = "General function prediction only",
+  S = "Function unknown"
+)
+```
+
+```{r gwas-annotate-function}
+annotate_sig_hits_eggnog <- function(label) {
+  direction_label <- pyseer_files$direction_label[pyseer_files$label == label]
+
+  pyseer_data[[label]] %>%
+    filter(p_fdr < 0.05) %>%
+    left_join(eggnog_lookup[[label]], by = "variant") %>%
+    mutate(
+      has_eggnog_name = !is.na(preferred) &
+        !str_detect(preferred, regex("hypothetical", ignore_case = TRUE)),
+      function_desc = ifelse(
+        !is.na(eggnog_desc) &
+          !str_detect(eggnog_desc, regex("hypothetical|uncharacterized", ignore_case = TRUE)),
+        eggnog_desc, NA_character_
+      ),
+      cog_category = case_when(
+        is.na(cog) | cog == "-"   ~ "No COG match",
+        str_sub(cog, 1, 1) == "S" ~ "S - Function unknown",
+        TRUE ~ paste0(str_sub(cog, 1, 1), " - ", cog_labels[str_sub(cog, 1, 1)])
+      ),
+      direction = as.character(ifelse(beta > 0,
+                        paste("Human-associated", direction_label),
+                        paste("Non-human-associated", direction_label)))
+    ) %>%
+    filter(has_eggnog_name) %>%
+    arrange(`lrt-pvalue`)
+}
+```
+
+```{r gwas-top20-tables}
+make_top20_eggnog_table <- function(label) {
+  annotate_sig_hits_eggnog(label) %>%
+    slice_head(n = 20) %>%
+    transmute(
+      `Gene`     = preferred,
+      `Function` = function_desc,
+      `COG`      = cog_category,
+      `Beta`     = round(beta, 3),
+      `p (FDR)`  = formatC(p_fdr, format = "e", digits = 2)
+    )
+}
+
+hits_human_covar_eggnog <- make_top20_eggnog_table("human_covar")
+hits_sp002404795_eggnog         <- make_top20_eggnog_table("sp002404795_human")
+
+hits_human_covar_eggnog
+hits_sp002404795_eggnog
+```
+
+```{r gwas-volcano-function}
+make_volcano_top20_eggnog <- function(label, top_n = 20, plot_title = NULL) {
+
+  meta          <- pyseer_files %>% filter(label == !!label)
+  deplete_label <- "Non-human-associated"
+  enrich_label  <- "Human-associated"
+  title_to_use  <- if (is.null(plot_title)) meta$title else plot_title
+
+  df <- pyseer_data[[label]] %>%
+    left_join(eggnog_lookup[[label]], by = "variant") %>%
+    mutate(
+      log10p          = -log10(`lrt-pvalue`),
+      significant     = p_fdr < 0.05,
+      has_eggnog_name = !is.na(preferred) &
+        !str_detect(preferred, regex("hypothetical", ignore_case = TRUE)),
+      display_cat = case_when(
+        significant & has_eggnog_name & beta > 0 ~ enrich_label,
+        significant & has_eggnog_name & beta < 0 ~ deplete_label,
+        TRUE ~ "Not significant"
+      )
+    )
+
+  n_sig       <- sum(df$significant)
+  n_annotated <- sum(df$significant & df$has_eggnog_name)
+
+  cat(meta$label, "- significant:", n_sig, "| eggNOG-annotated:", n_annotated, "\n")
+  if (n_annotated == 0) { message("No eggNOG-annotated hits for: ", meta$label); return(NULL) }
+
+  top_hits <- df %>% filter(significant & has_eggnog_name) %>%
+    slice_min(`lrt-pvalue`, n = top_n) %>% pull(variant)
+  df <- df %>% mutate(label_text = ifelse(variant %in% top_hits, preferred, NA))
+
+  threshold_y <- df %>% filter(significant) %>%
+    summarise(t = max(`lrt-pvalue`)) %>% pull(t)
+
+  ggplot(df, aes(x = beta, y = log10p, colour = display_cat)) +
+    geom_point(size  = ifelse(df$display_cat != "Not significant", 3.0, 0.4),
+               alpha = ifelse(df$display_cat != "Not significant", 1.0, 0.25)) +
+    geom_hline(yintercept = -log10(threshold_y), linetype = "dashed",
+               colour = "grey40", linewidth = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dotted", colour = "grey40", linewidth = 0.4) +
+    geom_text_repel(aes(label = label_text), size = 4.5, max.overlaps = 30,
+                    box.padding = 0.5, segment.size = 0.3, segment.colour = "grey50",
+                    fontface = "italic", na.rm = TRUE, min.segment.length = 0.2,
+                    show.legend = FALSE) +
+    scale_colour_manual(
+      values = setNames(
+        c(palette_direction[["Enriched"]], palette_direction[["Depleted"]], "#DDDDDD"),
+        c(enrich_label, deplete_label, "Not significant")
+      ),
+      breaks = c(deplete_label, enrich_label, "Not significant")
+    ) +
+    guides(colour = guide_legend(override.aes = list(size = 4, alpha = 1))) +
+    labs(title = title_to_use, x = "Effect size (beta)",
+         y = expression(-log[10](p)), colour = NULL) +
+    theme_clean +
+    theme(legend.position = "top",
+          axis.text  = element_text(size = FS_VOLCANO_AXIS),
+          axis.title = element_text(size = FS_VOLCANO_AXIS, face = "bold"))
+}
+```
+
+```{r gwas-volcano-plots}
+p_human_covar_eggnog <- make_volcano_top20_eggnog("human_covar",
+                                                  plot_title = "Genus-level host GWAS")
+p_human_covar_eggnog
+
+p_sp002404795_eggnog <- make_volcano_top20_eggnog("sp002404795_human",
+                                          plot_title = "Species-level host GWAS")
+p_sp002404795_eggnog
+
+save_fig("fig_v_human_covar_eggnog", p_human_covar_eggnog)
+save_fig("fig_v_sp002404795_eggnog", p_sp002404795_eggnog)
+```
+
+```{r gwas-cog-function}
+make_cog_directional <- function(label, plot_title = NULL, aspect_ratio = 1) {
+
+  meta          <- pyseer_files %>% filter(label == !!label)
+  deplete_label <- "Non-human-associated"
+  enrich_label  <- "Human-associated"
+  title_to_use  <- if (is.null(plot_title)) meta$title else plot_title
+
+  df_all <- pyseer_data[[label]] %>% filter(p_fdr < 0.05)
+  n_enrich_total  <- sum(df_all$beta > 0)
+  n_deplete_total <- sum(df_all$beta < 0)
+
+  if (nrow(df_all) == 0) {
+    message("No significant hits for: ", meta$label, " - skipping COG plot")
+    return(NULL)
+  }
+
+  df <- df_all %>%
+    left_join(eggnog_lookup[[label]], by = "variant") %>%
+    filter(!is.na(cog), cog != "-", str_sub(cog, 1, 1) != "S") %>%
+    mutate(
+      direction   = ifelse(beta > 0, enrich_label, deplete_label),
+      cog_primary = str_sub(cog, 1, 1),
+      cog_label   = cog_labels[cog_primary]
+    )
+
+  cog_summary <- df %>%
+    group_by(cog_label, direction) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    mutate(
+      prop = case_when(
+        direction == enrich_label  ~ n / n_enrich_total,
+        direction == deplete_label ~ n / n_deplete_total
+      ),
+      prop_signed = ifelse(direction == deplete_label, -prop, prop)
+    )
+
+  cog_order <- cog_summary %>% filter(direction == enrich_label) %>%
+    arrange(prop) %>% pull(cog_label)
+  all_cats  <- unique(cog_summary$cog_label)
+
+  complete_df <- expand.grid(cog_label = all_cats,
+                             direction = c(enrich_label, deplete_label),
+                             stringsAsFactors = FALSE) %>%
+    left_join(cog_summary, by = c("cog_label", "direction")) %>%
+    mutate(
+      n = replace_na(n, 0), prop = replace_na(prop, 0), prop_signed = replace_na(prop_signed, 0),
+      cog_label = factor(cog_label, levels = unique(c(cog_order, setdiff(all_cats, cog_order))))
+    )
+
+  x_limit <- max(abs(complete_df$prop_signed), na.rm = TRUE) * 1.3
+
+  ggplot(complete_df, aes(x = prop_signed, y = cog_label, fill = direction)) +
+    geom_col(width = 0.7, colour = "grey30", linewidth = 0.2) +
+    geom_vline(xintercept = 0, colour = "grey30", linewidth = 0.5) +
+    geom_text(
+      data = complete_df %>% filter(n > 0),
+      aes(label = n, x = prop_signed + ifelse(prop_signed >= 0, x_limit * 0.03, -x_limit * 0.03),
+          hjust = ifelse(prop_signed >= 0, 0, 1)),
+      size = FS_BAR_LABEL, colour = "black"
+    ) +
+    scale_fill_manual(
+      values = setNames(
+        c(palette_direction[["Enriched"]], palette_direction[["Depleted"]]),
+        c(enrich_label, deplete_label)
+      ),
+      breaks = c(deplete_label, enrich_label)
+    ) +
+    scale_x_continuous(labels = function(x) paste0(abs(round(x * 100, 0)), "%"),
+                       limits = c(-x_limit, x_limit)) +
+    labs(title = title_to_use, x = "Proportion of all significant hits", y = NULL, fill = NULL) +
+    theme_clean +
+    theme(legend.position = "top",
+          panel.grid.major.y = element_blank(),
+          axis.text.y = element_text(size = FS_COG_AXIS_TEXT + 2, lineheight = 1))
+}
+```
+
+```{r gwas-cog-plots}
+p_cog_genus   <- make_cog_directional("human_covar",
+                                      plot_title = "COG: genus-level host GWAS")
+p_cog_species <- make_cog_directional("sp002404795_human",
+                                      plot_title = "COG: species-level host GWAS")
+
+p_cog_genus
+p_cog_species
+
+save_fig("fig_cog_human_covar", p_cog_genus, height = 11)
+save_fig("fig_cog_sp002404795_human", p_cog_species, height = 7)
+```
+
+```{r gwas-cog-table-function}
+make_cog_directional_table <- function(label) {
+
+  enrich_label  <- "Enriched"
+  deplete_label <- "Depleted"
+
+  df_all <- pyseer_data[[label]] %>% filter(p_fdr < 0.05)
+  n_enrich_total  <- sum(df_all$beta > 0)
+  n_deplete_total <- sum(df_all$beta < 0)
+
+  if (nrow(df_all) == 0) return(tibble())
+
+  df <- df_all %>%
+    left_join(eggnog_lookup[[label]], by = "variant") %>%
+    filter(!is.na(cog), cog != "-", str_sub(cog, 1, 1) != "S") %>%
+    mutate(
+      direction   = ifelse(beta > 0, enrich_label, deplete_label),
+      cog_primary = str_sub(cog, 1, 1),
+      cog_label   = cog_labels[cog_primary]
+    )
+
+  df %>%
+    group_by(cog_label, direction) %>%
+    summarise(n_genes = n(), .groups = "drop") %>%
+    mutate(
+      proportion = case_when(
+        direction == enrich_label  ~ n_genes / n_enrich_total,
+        direction == deplete_label ~ n_genes / n_deplete_total
+      ),
+      `proportion (%)` = round(proportion * 100, 1)
+    ) %>%
+    select(`COG category` = cog_label, Direction = direction,
+           `n genes` = n_genes, `proportion (%)`) %>%
+    arrange(desc(`proportion (%)`))
+}
+```
+
+```{r gwas-summary-table}
+summarise_gwas <- function(label) {
+  meta <- pyseer_files %>% filter(label == !!label)
+  df   <- pyseer_data[[label]]
+  egg  <- eggnog_lookup[[label]]
+
+  df_annot <- df %>%
+    left_join(egg, by = "variant") %>%
+    mutate(
+      significant     = p_fdr < 0.05,
+      has_eggnog_name = !is.na(preferred) &
+        !str_detect(preferred, regex("hypothetical", ignore_case = TRUE)),
+      has_cog         = !is.na(cog) & cog != "-" & str_sub(cog, 1, 1) != "S"
+    )
+
+  sig <- df_annot %>% filter(significant)
+
+  tibble(
+    Analysis      = meta$title,
+    Label         = label,
+    Covariate     = ifelse(str_detect(label, "_covar$"), "Species-adjusted", "None"),
+    n_tested      = nrow(df),
+    n_significant = nrow(sig),
+    n_human_associated     = sum(sig$beta > 0),
+    n_non_human_associated = sum(sig$beta < 0),
+    n_eggnog_annotated            = sum(sig$has_eggnog_name),
+    n_eggnog_human_associated     = sum(sig$has_eggnog_name & sig$beta > 0),
+    n_eggnog_non_human_associated = sum(sig$has_eggnog_name & sig$beta < 0),
+    n_cog_annotated            = sum(sig$has_cog),
+    n_cog_human_associated     = sum(sig$has_cog & sig$beta > 0),
+    n_cog_non_human_associated = sum(sig$has_cog & sig$beta < 0)
+  )
+}
+
+gwas_summary <- bind_rows(lapply(pyseer_files$label, summarise_gwas))
+gwas_summary
+
+gwas_summary_pretty <- gwas_summary %>%
+  select(-Label) %>%
+  rename(
+    `Variants tested`             = n_tested,
+    `Significant hits`            = n_significant,
+    `Human-associated`            = n_human_associated,
+    `Non-human-associated`        = n_non_human_associated,
+    `eggNOG-annotated`            = n_eggnog_annotated,
+    `eggNOG human-associated`     = n_eggnog_human_associated,
+    `eggNOG non-human-associated` = n_eggnog_non_human_associated,
+    `COG-annotated`               = n_cog_annotated,
+    `COG human-associated`        = n_cog_human_associated,
+    `COG non-human-associated`    = n_cog_non_human_associated
+  )
+```
+
+# Save all GWAS tables to a single file
+```{r gwas-write-xlsx}
+
+top20_sheets <- setNames(
+  lapply(pyseer_files$label, make_top20_eggnog_table),
+  pyseer_files$label
+)
+
+cog_sheets <- list(
+  cog_human_covar = make_cog_directional_table("human_covar"),
+  cog_sp002404795         = make_cog_directional_table("sp002404795_human")
+)
+
+sheets <- c(list(gwas_summary = gwas_summary_pretty), top20_sheets, cog_sheets)
+sheets <- sheets[sapply(sheets, function(x) nrow(x) > 0)]
+
+write_xlsx(sheets, path = "gwas_tables.xlsx")
+cat("Wrote", length(sheets), "sheets to gwas_tables.xlsx\n")
+```
